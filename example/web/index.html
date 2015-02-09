@@ -1,0 +1,26 @@
+<html>
+  <head>
+    <script type="text/javascript" src="js/Long.min.js"></script>
+    <script type="text/javascript" src="js/ByteBufferAB.min.js"></script>
+    <script type="text/javascript" src="js/ProtoBuf.min.js"></script>
+    <script type="text/javascript" src="js/WSWebClient.min.js"></script>
+  </head>
+  
+  <body>
+    <script type="text/javascript">
+      var WSClient = require('WSClient');
+      var client = new WSClient('ws://127.0.0.1:3000', 'descriptors/vehicle.proto');
+      client.on('connect', function() {
+        console.log('yeah!');
+        client.on('vehicle.manager.GetStatus', function(msg) {
+          client.send('vehicle.client.Status', { power: true, camera_tilt: 0, camera_pan: 0 });
+          client.close();
+        });
+      });
+      
+      client.on('disconnect', function() {
+        console.log('owwwh');
+      });
+    </script>
+  </body>
+</html>

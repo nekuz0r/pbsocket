@@ -1,0 +1,26 @@
+<html>
+  <head>
+    
+    <script type="text/javascript" src="../assets/Long.js"></script>
+    <script type="text/javascript" src="../assets/ByteBufferAB.js"></script>
+    <script type="text/javascript" src="../assets/ProtoBuf.js"></script>
+    <script type="text/javascript" src="../build/WSClient.js"></script>
+  </head>
+  
+  <body>
+    <script type="text/javascript">
+      var WSClient = require('WSClient');
+      var Client = new WSClient('ws://192.168.1.18:3000', ['../../descriptors/protocol.proto']);
+      
+      Client.on('connect', function() {
+        console.log('Connect !');
+        
+        Client.on('vehicle.manager.GetStatus', function(msg) {
+          console.log(msg);
+          Client.send('vehicle.client.Status', { power: false, camera_tilt: 0, camera_pan: 1000 });
+          Client.close();
+        });
+      });
+    </script>
+  </body>
+</html>
