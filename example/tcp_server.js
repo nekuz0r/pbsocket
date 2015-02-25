@@ -1,12 +1,14 @@
 var TCPServer = require('../TCPServer');
 
-var s = new TCPServer(8000, __dirname + '/../descriptors/protocol.proto', 5678);
+var s = new TCPServer(8000, __dirname + '/example.proto', 5678);
 s.on('listening', function() {
-  console.log('server: listening.');
   s.on('connect', function(client) {
-    console.log('server: new client.');
     client.on('message', function(msg) {
-      console.log('server:', msg.messageName);
+      console.log('message', msg.name, 'from', msg.source, '(', msg.isContentUnserialized ,')')
+    });
+    
+    client.on('Hello', function(msg) {
+      client.sendTo(msg.source, 'World', { content: 'World' });
     });
   });
 });

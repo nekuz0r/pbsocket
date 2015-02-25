@@ -1,0 +1,4 @@
+import 'example.proto';
+
+message Ping {
+}

@@ -146,7 +146,7 @@ Message.prototype.parse = function parse(data, callback) {
       return callback(new Error('E_NAME'));
     }
     
-    this.data = messageDataPrototype.decode(messageDataBuffer);
+    this.data = messageDataPrototype.decode(this.data);
     this.isContentUnserialized = true;
   }
   

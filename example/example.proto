@@ -1,0 +1,7 @@
+message Hello {
+	optional string content = 1;
+}
+
+message World {
+	optional string content = 1;
+}
