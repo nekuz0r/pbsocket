@@ -68,52 +68,32 @@ Stream.prototype.onData = function onData(data) {
   }
 };
 
-Stream.prototype.send = function send() {
-  var message = undefined;
-  
-  if (arguments.length === 1 && typeof arguments[0] === 'object' && arguments[0] instanceof Messenger.Message) {
-    message = arguments[0];
-  }
-  else if (arguments.length === 2 && typeof arguments[0] === 'string' && typeof arguments[1] === 'object') {
-    var messageName = arguments[0];
-    var messageData = arguments[1];
-    message = this.messenger.newMessage(messageName, messageData);
-    message.source = this.address;
-    
-    //this.send(message);
-    return Stream.prototype.send.call(this, message);
-  }
-  
-  if (message !== undefined) {
-    message.serialize(function(err, buffer) {
-      if (!err) {
-        // TODO: Check error
-        this.socket.write(buffer);
-      }
-    }.bind(this));
-  }
+Stream.prototype.sendRaw = function sendRaw(message) {
+  message.serialize(function(err, buffer) {
+    if (!err) {
+      // TODO: Check error
+      this.socket.write(buffer);
+    }
+  }.bind(this));
 };
 
-Stream.prototype.sendTo = function sendTo() {
-  var message = undefined;
-  
-  if (arguments.length === 2 && typeof arguments[1] === 'object' && arguments[1] instanceof Messenger.Message) {
-    var destinationAddress = arguments[0];
-    message = arguments[1];
-    message.destination = destinationAddress;
-  }
-  else if (arguments.length === 3 && typeof arguments[1] === 'string' && typeof arguments[2] === 'object') {
-    var destinationAddress = arguments[0];
-    var messageName = arguments[1];
-    var messageData = arguments[2];
-    message = this.messenger.newMessage(messageName, messageData);
-    message.source = this.address;
-    message.destination = destinationAddress;
-  }
-  
-  return Stream.prototype.send.call(this, message);
-  //return this.send(message);
-}
+Stream.prototype.send = function send(/*string*/name, /*object*/data) {
+  var message = this.messenger.newMessage(name, data);
+  message.source = this.address;
+  Stream.prototype.sendRaw.call(this, message);
+};
+
+Stream.prototype.sendToRaw = function sendToRaw(destination, message) {
+  message.destination = destination;
+  Stream.prototype.sendRaw.call(this, message);
+};
+
+Stream.prototype.sendTo = function sendTo(destination, name, data) {
+  var message = this.messenger.newMessage(name, data);
+  message.source = this.address;
+  message.destination = destination;
+  Stream.prototype.sendRaw.call(this, message);
+};
 
 Stream.prototype.on = function on(event, func) {
   EventEmitter.prototype.removeAllListeners.call(this, event);
