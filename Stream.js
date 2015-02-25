@@ -50,6 +50,9 @@ Stream.prototype.onData = function onData(data) {
         return this.emit('error', err);
       }
       
+      // Forward message to upper layer
+      this.emit('message', message);
+      
       if (message.isContentUnserialized === true) {
         // Is this message addressed to me ?
         // Is it a broadcast ?
@@ -59,9 +62,6 @@ Stream.prototype.onData = function onData(data) {
             this.emit(message.name, message);
         }
       }
-      
-      // Forward message to upper layer
-      this.emit('message', message);
     }.bind(this));
     
     this.data = this.data.copy(messageLength);
