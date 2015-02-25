@@ -65,6 +65,8 @@ Messenger.prototype.newMessageFromBuffer = function newMessageFromBuffer(buffer,
 
 var Message = function Message(builder) {
   this.builder = builder;
+  this.isContentUnserialized = false;
+  
   this.name = undefined;
   this.data = {};
   this.source = BROADCAST_ADDRESS;
@@ -75,34 +77,32 @@ var Message = function Message(builder) {
 };
 
 Message.prototype.serialize = function serialize(callback) {
-  var messageDataPrototype = this.builder.build(this.name);
   var messagePrototype = this.builder.build('base.Message');
   
   if (messagePrototype === null) {
     return callback(new Error('E_INTERNAL_NAME'));
   }
   
-  if (messageDataPrototype === null) {
-    return callback(new Error('E_NAME'));
-  }
-  
-  var messageDataInstance = new messageDataPrototype(this.data);
-  var messageDataBuffer = messageDataInstance.encode().toBuffer();
-  
-  var bufferForChecksum;
-  if (typeof(window) === 'undefined') {
-    bufferForChecksum = messageDataBuffer;
-  }
-  else {
-    bufferForChecksum = new Uint8Array(messageDataBuffer);
+  if (this.builder.lookup(this.name)) {
+    var messageDataPrototype = this.builder.build(this.name);
+    
+    if (messageDataPrototype === null) {
+      return callback(new Error('E_NAME'));
+    }
+    
+    var messageDataInstance = new messageDataPrototype(this.data);
+    this.data = messageDataInstance.encode().toBuffer();
+    this.checksum = this.calculateChecksum();
+    
+    this.isContentUnserialized = false;
   }
   
   var messageInstance = new messagePrototype({
     'src': this.source,
     'dst': this.destination,
     'name': this.name,
-    'data': messageDataBuffer,
-    'checksum': adler32.sum(bufferForChecksum),
+    'data': this.data,
+    'checksum': this.checksum,
     'ttl': this.ttl,
     'uuid': this.uuid
   });
@@ -129,30 +129,36 @@ Message.prototype.parse = function parse(data, callback) {
   this.destination = messageInstance.dst;
   this.ttl = messageInstance.ttl;
   this.uuid = messageInstance.uuid;
+  this.data = messageInstance.data.toBuffer();
+  this.checksum = messageInstance.checksum;
   
-  var messageDataBuffer = messageInstance.data.toBuffer();
-  var bufferForChecksum;
-  if (typeof(window) === 'undefined') {
-    bufferForChecksum = messageDataBuffer;
-  }
-  else {
-    bufferForChecksum = new Uint8Array(messageDataBuffer)
-  }
-  var checksum = adler32.sum(bufferForChecksum);
-  
-  if (messageInstance.checksum !== checksum) {
+  if (this.checksum !== this.calculateChecksum()) {
     return callback(new Error('E_CHECKSUM'));
   }
   
-  var messageDataPrototype = this.builder.build(this.name);
-  
-  if (messageDataPrototype === null) {
-    return callback(new Error('E_NAME'));
+  // Decode the message content if we can
+  // This is usefull for router, which don't know about all the message going
+  // through them
+  if (this.builder.lookup(this.name)) {
+    var messageDataPrototype = this.builder.build(this.name);
+    
+    if (messageDataPrototype === null) {
+      return callback(new Error('E_NAME'));
+    }
+    
+    this.data = messageDataPrototype.decode(messageDataBuffer);
+    this.isContentUnserialized = true;
   }
   
-  this.data = messageDataPrototype.decode(messageDataBuffer);
-  
   return callback(null, this);
+};
+
+Message.prototype.calculateChecksum = function calculateChecksum() {
+  var buffer = this.data;
+  if (typeof(window) !== 'undefined') {
+    buffer = new Uint8Array(this.data);
+  }
+  return adler32.sum(buffer);
 };
 
 Messenger.Message = Message;
