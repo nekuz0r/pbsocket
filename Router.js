@@ -80,7 +80,7 @@ Router.prototype.forward = function forward(message, sourceSocket) {
   for (var i = 0; i < dstIfaces.length; i++) {
     if (dstIfaces[i] !== sourceSocket) {
       console.log('forwarding message from', message.source.toString(), 'to', message.destination.toString(), '@', dstIfaces[i].uuid);
-      dstIfaces[i].send(message);
+      dstIfaces[i].sendRaw(message);
     }
   }
 };
@@ -91,7 +91,7 @@ Router.prototype.broadcast = function broadcast(message, sourceSocket) {
     dstIface = this.ifaces[i];
     if (dstIface != sourceSocket) {
       console.log('forwarding message from', message.source.toString(), 'to', message.destination.toString(), '@', dstIface.uuid, '(broadcast)');
-      dstIface.send(message);
+      dstIface.sendRaw(message);
     }
   }
 };
