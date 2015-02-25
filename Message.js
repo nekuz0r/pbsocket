@@ -55,6 +55,7 @@ Messenger.prototype.newMessage = function newMessage(name, data) {
   var message = new Message(this.builder);
   message.name = name;
   message.data = data || {};
+  message.isContentUnserialized = true;
   return message;
 };
 
