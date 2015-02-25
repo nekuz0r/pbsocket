@@ -50,12 +50,14 @@ Stream.prototype.onData = function onData(data) {
         return this.emit('error', err);
       }
       
-      // Is this message addressed to me ?
-      // Is it a broadcast ?
-      if (message.destination.equals(this.address) === true
-        || message.destination.equals(BROADCAST_ADDRESS) === true) {
-          // Forward message to application layer
-          this.emit(message.name, message);
+      if (message.isContentUnserialized === true) {
+        // Is this message addressed to me ?
+        // Is it a broadcast ?
+        if (message.destination.equals(this.address) === true
+          || message.destination.equals(BROADCAST_ADDRESS) === true) {
+            // Forward message to application layer
+            this.emit(message.name, message);
+        }
       }
       
       // Forward message to upper layer
