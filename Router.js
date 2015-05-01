@@ -24,7 +24,7 @@ Router.prototype.addInterface = function addInterface(iface) {
         this.routingTable[message.source] = [];
       }
 
-      if (message.source !== 0) {
+      if (message.source.equals(BROADCAST_ADDRESS) === false) {
         if (this.routingTable[message.source].indexOf(socket) === -1) {
           console.log('add route to', message.source.toString(), '@', socket.uuid);
           this.routingTable[message.source].push(socket);
@@ -111,12 +111,3 @@ Router.prototype.broadcast = function broadcast(message, sourceSocket) {
 };
 
 module.exports = Router;
-
-/*
-var TCPServer = require('./TCPServer');
-
-var r = new Router();
-var s = new TCPServer(8000, './descriptors/protocol.proto');
-
-r.addInterface(s);
-*/
