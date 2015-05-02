@@ -1,658 +1,4 @@
 require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
-var util = require('util');
-var Stream = require('./Stream');
-
-var Client = function Client(createSocket, descriptor, address) {
-  this.closeRequested = false;
-  this.connected = false;
-  
-  var connectHandler = function connectHandler() {
-    this.connected = true;
-    this.emit('connect', this);
-  }.bind(this);
-  
-  var closeHandler = function closeHandler() {
-    this.connected = false;
-    if (this.closeRequested === false) {
-      setTimeout(connect, 10 * 1000);
-    }
-    this.emit('disconnect', this);
-  }.bind(this);
-  
-  var errorHandler = function errorHandler(error) {
-    
-  }.bind(this);
-  
-  var connect = function connect() {
-    this.socket = createSocket();
-    if (typeof(window) === 'undefined') {
-      this.socket.on('connect', connectHandler);
-      this.socket.on('open', connectHandler);
-      this.socket.on('close', closeHandler);
-      this.socket.on('error', errorHandler);
-    }
-    else {
-      this.socket.binaryType = "arraybuffer";
-      this.socket.onopen = connectHandler;
-      this.socket.onclose = closeHandler;
-      this.socket.onerror = errorHandler;
-    }
-    Stream.call(this, descriptor, this.socket, address);
-  }.bind(this);
-  
-  connect();
-};
-util.inherits(Client, Stream);
-
-Client.prototype.send = function send() {
-  if (this.connected === true) {
-    Stream.prototype.send.apply(this, arguments);
-  }
-};
-
-Client.prototype.close = function close() {
-  this.closeRequested = true;
-  this.socket.end();
-};
-
-module.exports = Client;
-},{"./Stream":3,"util":10}],2:[function(require,module,exports){
-var adler32 = require('adler32');
-var uuid = require('node-uuid');
-var Long, protobufjs, ByteBuffer;
-if (typeof(window) === 'undefined') {
-  Long = require('long');
-  protobufjs = require('protobufjs');
-  ByteBuffer = require('bytebuffer');
-}
-else {
-  Long = dcodeIO.Long;
-  protobufjs = dcodeIO.ProtoBuf;
-  ByteBuffer = dcodeIO.ByteBuffer;
-}
-
-var BROADCAST_ADDRESS = new Long(0, 0, true);
-var DEFAULT_TTL = 2;
-
-var Messenger = function Messenger(descriptors) {
-  // Make sure descriptors is an array
-  descriptors = [].concat(descriptors);
-  
-  // Create a new protobufjs builder
-  this.builder = protobufjs.newBuilder();
-  
-  // Load base messages descriptor
-  protobufjs.loadProto("package base; \
-  message Message { \
-    optional uint64 src = 0; \
-    optional uint64 dst = 1; \
-    optional string name = 2; \
-    optional bytes data = 3; \
-    optional uint32 checksum = 4; \
-    optional uint32 ttl = 5; \
-    optional string uuid = 6; \
-  } \
-  message ACK { \
-    optional string uuid = 1; \
-  } \
-  message NAK { \
-    optional string uuid = 1; \
-  }", this.builder);
-  
-  // Load the user defined messages descriptors
-  for (var i = 0; i < descriptors.length; i++) {
-    protobufjs.loadProtoFile(descriptors[i], this.builder);
-  }
-};
-
-Messenger.prototype.newMessage = function newMessage(name, data) {
-  // Validate message name
-  if (this.builder.lookup(name) === null) {
-    return null;
-  }
-  
-  var message = new Message(this.builder);
-  message.name = name;
-  message.data = data || {};
-  return message;
-};
-
-Messenger.prototype.newMessageFromBuffer = function newMessageFromBuffer(buffer, callback) {
-  var message = new Message(this.builder);
-  return message.parse(buffer, callback);
-};
-
-var Message = function Message(builder) {
-  this.builder = builder;
-  this.name = undefined;
-  this.data = {};
-  this.source = BROADCAST_ADDRESS;
-  this.destination = BROADCAST_ADDRESS;
-  this.ttl = DEFAULT_TTL;
-  this.creationTime = new Date().getTime();
-  this.uuid = uuid.v1();
-};
-
-Message.prototype.serialize = function serialize(callback) {
-  var messageDataPrototype = this.builder.build(this.name);
-  var messagePrototype = this.builder.build('base.Message');
-  
-  if (messagePrototype === null) {
-    return callback(new Error('E_INTERNAL_NAME'));
-  }
-  
-  if (messageDataPrototype === null) {
-    return callback(new Error('E_NAME'));
-  }
-  
-  var messageDataInstance = new messageDataPrototype(this.data);
-  var messageDataBuffer = messageDataInstance.encode().toBuffer();
-  
-  var bufferForChecksum;
-  if (typeof(window) === 'undefined') {
-    bufferForChecksum = messageDataBuffer;
-  }
-  else {
-    bufferForChecksum = new Uint8Array(messageDataBuffer);
-  }
-  
-  var messageInstance = new messagePrototype({
-    'src': this.source,
-    'dst': this.destination,
-    'name': this.name,
-    'data': messageDataBuffer,
-    'checksum': adler32.sum(bufferForChecksum),
-    'ttl': this.ttl,
-    'uuid': this.uuid
-  });
-  var messageBuffer = messageInstance.encode();
-  
-  var finalBuffer = new ByteBuffer(4);
-  finalBuffer.writeUint32(messageBuffer.limit + 4, 0);
-  finalBuffer = ByteBuffer.concat([ finalBuffer, messageBuffer.toBuffer() ]);
-  
-  return callback(null, finalBuffer.toBuffer());
-};
-
-Message.prototype.parse = function parse(data, callback) {
-  var messagePrototype = this.builder.build('base.Message');
-  
-  if (messagePrototype === null) {
-    return callback(new Error('E_INTERNAL_NAME'));
-  }
-  
-  var messageInstance = messagePrototype.decode(data.toBuffer());
-  
-  this.name = messageInstance.name;
-  this.source = messageInstance.src;
-  this.destination = messageInstance.dst;
-  this.ttl = messageInstance.ttl;
-  this.uuid = messageInstance.uuid;
-  
-  var messageDataBuffer = messageInstance.data.toBuffer();
-  var bufferForChecksum;
-  if (typeof(window) === 'undefined') {
-    bufferForChecksum = messageDataBuffer;
-  }
-  else {
-    bufferForChecksum = new Uint8Array(messageDataBuffer)
-  }
-  var checksum = adler32.sum(bufferForChecksum);
-  
-  if (messageInstance.checksum !== checksum) {
-    return callback(new Error('E_CHECKSUM'));
-  }
-  
-  var messageDataPrototype = this.builder.build(this.name);
-  
-  if (messageDataPrototype === null) {
-    return callback(new Error('E_NAME'));
-  }
-  
-  this.data = messageDataPrototype.decode(messageDataBuffer);
-  
-  return callback(null, this);
-};
-
-Messenger.Message = Message;
-
-module.exports = Messenger;
-},{"adler32":4,"bytebuffer":"bytebuffer","long":"long","node-uuid":5,"protobufjs":"protobufjs"}],3:[function(require,module,exports){
-var EventEmitter = require('events').EventEmitter;
-var util = require('util');
-var Long, ByteBuffer;
-if (typeof(window) === 'undefined') {
-  Long = require('long');
-  ByteBuffer = require('bytebuffer');
-}
-else {
-  Long = dcodeIO.Long;
-  ByteBuffer = dcodeIO.ByteBuffer;
-}
-
-var Messenger = require('./Message');
-
-var BROADCAST_ADDRESS = new Long(0, 0, true);
-
-var Stream = function Stream(descriptors, socket, address) {
-  EventEmitter.call(this);
-  
-  this.messenger = new Messenger(descriptors);
-  this.address = Long.fromValue(address || BROADCAST_ADDRESS);
-  this.data = new ByteBuffer(0);
-  this.socket = socket;
-  if (typeof(window) === 'undefined') {
-    this.socket.on('data', this.onData.bind(this));
-  }
-  else {
-    this.socket.onmessage = this.onData.bind(this);
-  }
-};
-util.inherits(Stream, EventEmitter);
-
-Stream.prototype.onData = function onData(data) {
-  if (typeof(window) === 'undefined') {
-    this.data = ByteBuffer.concat([ this.data, data ]);
-  }
-  else {
-    this.data = ByteBuffer.concat([ this.data, data.data ]);
-  }
-  
-  while (this.data.limit) {
-    var messageLength = this.data.readUint32(0);
-    
-    // Do we have received enough data ?
-    if (this.data.limit < messageLength) { break; }
-    
-    var buffer = this.data.copy(4, messageLength);
-    this.messenger.newMessageFromBuffer(buffer, function(err, message) {
-      if (err) {
-        return this.emit('error', err);
-      }
-      
-      // Is this message addressed to me ?
-      // Is it a broadcast ?
-      if (message.destination.equals(this.address) === true
-        || message.destination.equals(BROADCAST_ADDRESS) === true) {
-          // Forward message to application layer
-          this.emit(message.name, message);
-      }
-      
-      // Forward message to upper layer
-      this.emit('message', message);
-    }.bind(this));
-    
-    this.data = this.data.copy(messageLength);
-  }
-};
-
-Stream.prototype.send = function send() {
-  var message = undefined;
-  
-  if (arguments.length === 1 && typeof arguments[0] === 'object' && arguments[0] instanceof Messenger.Message) {
-    message = arguments[0];
-  }
-  else if (arguments.length === 2 && typeof arguments[0] === 'string' && typeof arguments[1] === 'object') {
-    var messageName = arguments[0];
-    var messageData = arguments[1];
-    message = this.messenger.newMessage(messageName, messageData);
-    message.source = this.address;
-    
-    //this.send(message);
-    return Stream.prototype.send.call(this, message);
-  }
-  
-  if (message !== undefined) {
-    message.serialize(function(err, buffer) {
-      if (!err) {
-        // TODO: Check error
-        this.socket.write(buffer);
-      }
-    }.bind(this));
-  }
-};
-
-Stream.prototype.sendTo = function sendTo() {
-  var message = undefined;
-  
-  if (arguments.length === 2 && typeof arguments[1] === 'object' && arguments[1] instanceof Messenger.Message) {
-    var destinationAddress = arguments[0];
-    message = arguments[1];
-    message.destination = destinationAddress;
-  }
-  else if (arguments.length === 3 && typeof arguments[1] === 'string' && typeof arguments[2] === 'object') {
-    var destinationAddress = arguments[0];
-    var messageName = arguments[1];
-    var messageData = arguments[2];
-    message = this.messenger.newMessage(messageName, messageData);
-    message.source = this.address;
-    message.destination = destinationAddress;
-  }
-  
-  return Stream.prototype.send.call(this, message);
-  //return this.send(message);
-}
-
-Stream.prototype.on = function on(event, func) {
-  EventEmitter.prototype.removeAllListeners.call(this, event);
-  EventEmitter.prototype.on.call(this, event, func);
-};
-
-module.exports = Stream;
-},{"./Message":2,"bytebuffer":"bytebuffer","events":6,"long":"long","util":10}],4:[function(require,module,exports){
-
-"use strict";
-
-/**
- * Largest prime smaller than 2^16 (65536)
- */
-var BASE = 65521;
-
-/**
- * Largest value n such that 255n(n+1)/2 + (n+1)(BASE-1) <= 2^32-1
- *
- * NMAX is just how often modulo needs to be taken of the two checksum word halves to prevent overflowing a 32 bit
- * integer. This is an optimization. We "could" take the modulo after each byte, and it must be taken before each
- * digest.
- */
-var NMAX = 5552;
-
-exports.sum = function(buf, adler)
-{
-	if (adler == null)
-		adler = 1;
-
-	var a = adler & 0xFFFF,
-		b = (adler >>> 16) & 0xFFFF,
-		i = 0,
-		max = buf.length,
-		n, value;
-
-	while (i < max)
-	{
-		n = Math.min(NMAX, max - i);
-
-		do
-		{
-			a += buf[i++]<<0;
-			b += a;
-		}
-		while (--n);
-
-		a %= BASE;
-		b %= BASE;
-	}
-
-	return ((b << 16) | a) >>> 0;
-};
-
-exports.roll = function(sum, length, oldByte, newByte)
-{
-	var a = sum & 0xFFFF,
-		b = (sum >>> 16) & 0xFFFF;
-
-	if (newByte != null)
-	{
-		a = (a - oldByte + newByte + BASE) % BASE;
-		b = (b - ((length * oldByte) % BASE) + a - 1 + BASE) % BASE;
-	}
-	else
-	{
-		a = (a - oldByte + BASE) % BASE;
-		b = (b - ((length * oldByte) % BASE) - 1 + BASE) % BASE;
-	}
-
-	return ((b << 16) | a) >>> 0;
-};
-
-},{}],5:[function(require,module,exports){
-//     uuid.js
-//
-//     Copyright (c) 2010-2012 Robert Kieffer
-//     MIT License - http://opensource.org/licenses/mit-license.php
-
-(function() {
-  var _global = this;
-
-  // Unique ID creation requires a high quality random # generator.  We feature
-  // detect to determine the best RNG source, normalizing to a function that
-  // returns 128-bits of randomness, since that's what's usually required
-  var _rng;
-
-  // Node.js crypto-based RNG - http://nodejs.org/docs/v0.6.2/api/crypto.html
-  //
-  // Moderately fast, high quality
-  if (typeof(_global.require) == 'function') {
-    try {
-      var _rb = _global.require('crypto').randomBytes;
-      _rng = _rb && function() {return _rb(16);};
-    } catch(e) {}
-  }
-
-  if (!_rng && _global.crypto && crypto.getRandomValues) {
-    // WHATWG crypto-based RNG - http://wiki.whatwg.org/wiki/Crypto
-    //
-    // Moderately fast, high quality
-    var _rnds8 = new Uint8Array(16);
-    _rng = function whatwgRNG() {
-      crypto.getRandomValues(_rnds8);
-      return _rnds8;
-    };
-  }
-
-  if (!_rng) {
-    // Math.random()-based (RNG)
-    //
-    // If all else fails, use Math.random().  It's fast, but is of unspecified
-    // quality.
-    var  _rnds = new Array(16);
-    _rng = function() {
-      for (var i = 0, r; i < 16; i++) {
-        if ((i & 0x03) === 0) r = Math.random() * 0x100000000;
-        _rnds[i] = r >>> ((i & 0x03) << 3) & 0xff;
-      }
-
-      return _rnds;
-    };
-  }
-
-  // Buffer class to use
-  var BufferClass = typeof(_global.Buffer) == 'function' ? _global.Buffer : Array;
-
-  // Maps for number <-> hex string conversion
-  var _byteToHex = [];
-  var _hexToByte = {};
-  for (var i = 0; i < 256; i++) {
-    _byteToHex[i] = (i + 0x100).toString(16).substr(1);
-    _hexToByte[_byteToHex[i]] = i;
-  }
-
-  // **`parse()` - Parse a UUID into it's component bytes**
-  function parse(s, buf, offset) {
-    var i = (buf && offset) || 0, ii = 0;
-
-    buf = buf || [];
-    s.toLowerCase().replace(/[0-9a-f]{2}/g, function(oct) {
-      if (ii < 16) { // Don't overflow!
-        buf[i + ii++] = _hexToByte[oct];
-      }
-    });
-
-    // Zero out remaining bytes if string was short
-    while (ii < 16) {
-      buf[i + ii++] = 0;
-    }
-
-    return buf;
-  }
-
-  // **`unparse()` - Convert UUID byte array (ala parse()) into a string**
-  function unparse(buf, offset) {
-    var i = offset || 0, bth = _byteToHex;
-    return  bth[buf[i++]] + bth[buf[i++]] +
-            bth[buf[i++]] + bth[buf[i++]] + '-' +
-            bth[buf[i++]] + bth[buf[i++]] + '-' +
-            bth[buf[i++]] + bth[buf[i++]] + '-' +
-            bth[buf[i++]] + bth[buf[i++]] + '-' +
-            bth[buf[i++]] + bth[buf[i++]] +
-            bth[buf[i++]] + bth[buf[i++]] +
-            bth[buf[i++]] + bth[buf[i++]];
-  }
-
-  // **`v1()` - Generate time-based UUID**
-  //
-  // Inspired by https://github.com/LiosK/UUID.js
-  // and http://docs.python.org/library/uuid.html
-
-  // random #'s we need to init node and clockseq
-  var _seedBytes = _rng();
-
-  // Per 4.5, create and 48-bit node id, (47 random bits + multicast bit = 1)
-  var _nodeId = [
-    _seedBytes[0] | 0x01,
-    _seedBytes[1], _seedBytes[2], _seedBytes[3], _seedBytes[4], _seedBytes[5]
-  ];
-
-  // Per 4.2.2, randomize (14 bit) clockseq
-  var _clockseq = (_seedBytes[6] << 8 | _seedBytes[7]) & 0x3fff;
-
-  // Previous uuid creation time
-  var _lastMSecs = 0, _lastNSecs = 0;
-
-  // See https://github.com/broofa/node-uuid for API details
-  function v1(options, buf, offset) {
-    var i = buf && offset || 0;
-    var b = buf || [];
-
-    options = options || {};
-
-    var clockseq = options.clockseq != null ? options.clockseq : _clockseq;
-
-    // UUID timestamps are 100 nano-second units since the Gregorian epoch,
-    // (1582-10-15 00:00).  JSNumbers aren't precise enough for this, so
-    // time is handled internally as 'msecs' (integer milliseconds) and 'nsecs'
-    // (100-nanoseconds offset from msecs) since unix epoch, 1970-01-01 00:00.
-    var msecs = options.msecs != null ? options.msecs : new Date().getTime();
-
-    // Per 4.2.1.2, use count of uuid's generated during the current clock
-    // cycle to simulate higher resolution clock
-    var nsecs = options.nsecs != null ? options.nsecs : _lastNSecs + 1;
-
-    // Time since last uuid creation (in msecs)
-    var dt = (msecs - _lastMSecs) + (nsecs - _lastNSecs)/10000;
-
-    // Per 4.2.1.2, Bump clockseq on clock regression
-    if (dt < 0 && options.clockseq == null) {
-      clockseq = clockseq + 1 & 0x3fff;
-    }
-
-    // Reset nsecs if clock regresses (new clockseq) or we've moved onto a new
-    // time interval
-    if ((dt < 0 || msecs > _lastMSecs) && options.nsecs == null) {
-      nsecs = 0;
-    }
-
-    // Per 4.2.1.2 Throw error if too many uuids are requested
-    if (nsecs >= 10000) {
-      throw new Error('uuid.v1(): Can\'t create more than 10M uuids/sec');
-    }
-
-    _lastMSecs = msecs;
-    _lastNSecs = nsecs;
-    _clockseq = clockseq;
-
-    // Per 4.1.4 - Convert from unix epoch to Gregorian epoch
-    msecs += 12219292800000;
-
-    // `time_low`
-    var tl = ((msecs & 0xfffffff) * 10000 + nsecs) % 0x100000000;
-    b[i++] = tl >>> 24 & 0xff;
-    b[i++] = tl >>> 16 & 0xff;
-    b[i++] = tl >>> 8 & 0xff;
-    b[i++] = tl & 0xff;
-
-    // `time_mid`
-    var tmh = (msecs / 0x100000000 * 10000) & 0xfffffff;
-    b[i++] = tmh >>> 8 & 0xff;
-    b[i++] = tmh & 0xff;
-
-    // `time_high_and_version`
-    b[i++] = tmh >>> 24 & 0xf | 0x10; // include version
-    b[i++] = tmh >>> 16 & 0xff;
-
-    // `clock_seq_hi_and_reserved` (Per 4.2.2 - include variant)
-    b[i++] = clockseq >>> 8 | 0x80;
-
-    // `clock_seq_low`
-    b[i++] = clockseq & 0xff;
-
-    // `node`
-    var node = options.node || _nodeId;
-    for (var n = 0; n < 6; n++) {
-      b[i + n] = node[n];
-    }
-
-    return buf ? buf : unparse(b);
-  }
-
-  // **`v4()` - Generate random UUID**
-
-  // See https://github.com/broofa/node-uuid for API details
-  function v4(options, buf, offset) {
-    // Deprecated - 'format' argument, as supported in v1.2
-    var i = buf && offset || 0;
-
-    if (typeof(options) == 'string') {
-      buf = options == 'binary' ? new BufferClass(16) : null;
-      options = null;
-    }
-    options = options || {};
-
-    var rnds = options.random || (options.rng || _rng)();
-
-    // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
-    rnds[6] = (rnds[6] & 0x0f) | 0x40;
-    rnds[8] = (rnds[8] & 0x3f) | 0x80;
-
-    // Copy bytes to buffer, if provided
-    if (buf) {
-      for (var ii = 0; ii < 16; ii++) {
-        buf[i + ii] = rnds[ii];
-      }
-    }
-
-    return buf || unparse(rnds);
-  }
-
-  // Export public API
-  var uuid = v4;
-  uuid.v1 = v1;
-  uuid.v4 = v4;
-  uuid.parse = parse;
-  uuid.unparse = unparse;
-  uuid.BufferClass = BufferClass;
-
-  if (typeof define === 'function' && define.amd) {
-    // Publish as AMD module
-    define(function() {return uuid;});
-  } else if (typeof(module) != 'undefined' && module.exports) {
-    // Publish as node.js module
-    module.exports = uuid;
-  } else {
-    // Publish as global (in browsers)
-    var _previousRoot = _global.uuid;
-
-    // **`noConflict()` - (browser only) to reset global 'uuid' var**
-    uuid.noConflict = function() {
-      _global.uuid = _previousRoot;
-      return uuid;
-    };
-
-    _global.uuid = uuid;
-  }
-}).call(this);
-
-},{}],6:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -955,7 +301,7 @@ function isUndefined(arg) {
   return arg === void 0;
 }
 
-},{}],7:[function(require,module,exports){
+},{}],2:[function(require,module,exports){
 if (typeof Object.create === 'function') {
   // implementation from standard node.js 'util' module
   module.exports = function inherits(ctor, superCtor) {
@@ -980,73 +326,76 @@ if (typeof Object.create === 'function') {
   }
 }
 
-},{}],8:[function(require,module,exports){
+},{}],3:[function(require,module,exports){
 // shim for using process in browser
 
 var process = module.exports = {};
+var queue = [];
+var draining = false;
+var currentQueue;
+var queueIndex = -1;
 
-process.nextTick = (function () {
-    var canSetImmediate = typeof window !== 'undefined'
-    && window.setImmediate;
-    var canMutationObserver = typeof window !== 'undefined'
-    && window.MutationObserver;
-    var canPost = typeof window !== 'undefined'
-    && window.postMessage && window.addEventListener
-    ;
-
-    if (canSetImmediate) {
-        return function (f) { return window.setImmediate(f) };
+function cleanUpNextTick() {
+    draining = false;
+    if (currentQueue.length) {
+        queue = currentQueue.concat(queue);
+    } else {
+        queueIndex = -1;
     }
-
-    var queue = [];
-
-    if (canMutationObserver) {
-        var hiddenDiv = document.createElement("div");
-        var observer = new MutationObserver(function () {
-            var queueList = queue.slice();
-            queue.length = 0;
-            queueList.forEach(function (fn) {
-                fn();
-            });
-        });
-
-        observer.observe(hiddenDiv, { attributes: true });
-
-        return function nextTick(fn) {
-            if (!queue.length) {
-                hiddenDiv.setAttribute('yes', 'no');
-            }
-            queue.push(fn);
-        };
+    if (queue.length) {
+        drainQueue();
     }
+}
 
-    if (canPost) {
-        window.addEventListener('message', function (ev) {
-            var source = ev.source;
-            if ((source === window || source === null) && ev.data === 'process-tick') {
-                ev.stopPropagation();
-                if (queue.length > 0) {
-                    var fn = queue.shift();
-                    fn();
-                }
-            }
-        }, true);
-
-        return function nextTick(fn) {
-            queue.push(fn);
-            window.postMessage('process-tick', '*');
-        };
+function drainQueue() {
+    if (draining) {
+        return;
     }
+    var timeout = setTimeout(cleanUpNextTick);
+    draining = true;
 
-    return function nextTick(fn) {
-        setTimeout(fn, 0);
-    };
-})();
+    var len = queue.length;
+    while(len) {
+        currentQueue = queue;
+        queue = [];
+        while (++queueIndex < len) {
+            currentQueue[queueIndex].run();
+        }
+        queueIndex = -1;
+        len = queue.length;
+    }
+    currentQueue = null;
+    draining = false;
+    clearTimeout(timeout);
+}
 
+process.nextTick = function (fun) {
+    var args = new Array(arguments.length - 1);
+    if (arguments.length > 1) {
+        for (var i = 1; i < arguments.length; i++) {
+            args[i - 1] = arguments[i];
+        }
+    }
+    queue.push(new Item(fun, args));
+    if (!draining) {
+        setTimeout(drainQueue, 0);
+    }
+};
+
+// v8 likes predictible objects
+function Item(fun, array) {
+    this.fun = fun;
+    this.array = array;
+}
+Item.prototype.run = function () {
+    this.fun.apply(null, this.array);
+};
 process.title = 'browser';
 process.browser = true;
 process.env = {};
 process.argv = [];
+process.version = ''; // empty string to avoid regexp issues
+process.versions = {};
 
 function noop() {}
 
@@ -1067,15 +416,16 @@ process.cwd = function () { return '/' };
 process.chdir = function (dir) {
     throw new Error('process.chdir is not supported');
 };
+process.umask = function() { return 0; };
 
-},{}],9:[function(require,module,exports){
+},{}],4:[function(require,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
     && typeof arg.fill === 'function'
     && typeof arg.readUInt8 === 'function';
 }
-},{}],10:[function(require,module,exports){
+},{}],5:[function(require,module,exports){
 (function (process,global){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -1665,7 +1015,652 @@ function hasOwnProperty(obj, prop) {
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":9,"_process":8,"inherits":7}],"WSClient":[function(require,module,exports){
+},{"./support/isBuffer":4,"_process":3,"inherits":2}],6:[function(require,module,exports){
+var util = require('util');
+var Stream = require('./Stream');
+
+var Client = function Client(createSocket, descriptor, address) {
+  this.closeRequested = false;
+  this.connected = false;
+  
+  var connectHandler = function connectHandler() {
+    this.connected = true;
+    this.emit('connect', this);
+  }.bind(this);
+  
+  var closeHandler = function closeHandler() {
+    this.connected = false;
+    if (this.closeRequested === false) {
+      setTimeout(connect, 10 * 1000);
+    }
+    this.emit('disconnect', this);
+  }.bind(this);
+  
+  var errorHandler = function errorHandler(error) {
+    
+  }.bind(this);
+  
+  var connect = function connect() {
+    this.socket = createSocket();
+    if (typeof(window) === 'undefined') {
+      this.socket.on('connect', connectHandler);
+      this.socket.on('open', connectHandler);
+      this.socket.on('close', closeHandler);
+      this.socket.on('error', errorHandler);
+    }
+    else {
+      this.socket.binaryType = "arraybuffer";
+      this.socket.onopen = connectHandler;
+      this.socket.onclose = closeHandler;
+      this.socket.onerror = errorHandler;
+    }
+    Stream.call(this, descriptor, this.socket, address);
+  }.bind(this);
+  
+  connect();
+};
+util.inherits(Client, Stream);
+
+Client.prototype.send = function send() {
+  if (this.connected === true) {
+    Stream.prototype.send.apply(this, arguments);
+  }
+};
+
+Client.prototype.close = function close() {
+  this.closeRequested = true;
+  this.socket.end();
+};
+
+module.exports = Client;
+},{"./Stream":8,"util":5}],7:[function(require,module,exports){
+var adler32 = require('adler32');
+var uuid = require('node-uuid');
+var Long, protobufjs, ByteBuffer;
+if (typeof(window) === 'undefined') {
+  Long = require('long');
+  protobufjs = require('protobufjs');
+  ByteBuffer = require('bytebuffer');
+}
+else {
+  Long = dcodeIO.Long;
+  protobufjs = dcodeIO.ProtoBuf;
+  ByteBuffer = dcodeIO.ByteBuffer;
+}
+
+var BROADCAST_ADDRESS = new Long(0, 0, true);
+var DEFAULT_TTL = 2;
+
+var Messenger = function Messenger(descriptors) {
+  // Make sure descriptors is an array
+  descriptors = [].concat(descriptors);
+  
+  // Create a new protobufjs builder
+  this.builder = protobufjs.newBuilder();
+  
+  // Load base messages descriptor
+  protobufjs.loadProto("package base; \
+  message Message { \
+    optional uint64 src = 0; \
+    optional uint64 dst = 1; \
+    optional string name = 2; \
+    optional bytes data = 3; \
+    optional uint32 checksum = 4; \
+    optional uint32 ttl = 5; \
+    optional string uuid = 6; \
+  } \
+  message ACK { \
+    optional string uuid = 1; \
+  } \
+  message NAK { \
+    optional string uuid = 1; \
+  }", this.builder);
+  
+  // Load the user defined messages descriptors
+  for (var i = 0; i < descriptors.length; i++) {
+    protobufjs.loadProtoFile(descriptors[i], this.builder);
+  }
+};
+
+Messenger.prototype.newMessage = function newMessage(name, data) {
+  // Validate message name
+  if (this.builder.lookup(name) === null) {
+    return null;
+  }
+  
+  var message = new Message(this.builder);
+  message.name = name;
+  message.data = data || {};
+  message.isContentUnserialized = true;
+  return message;
+};
+
+Messenger.prototype.newMessageFromBuffer = function newMessageFromBuffer(buffer, callback) {
+  var message = new Message(this.builder);
+  return message.parse(buffer, callback);
+};
+
+var Message = function Message(builder) {
+  this.builder = builder;
+  this.isContentUnserialized = false;
+  
+  this.name = undefined;
+  this.data = {};
+  this.source = BROADCAST_ADDRESS;
+  this.destination = BROADCAST_ADDRESS;
+  this.ttl = DEFAULT_TTL;
+  this.creationTime = new Date().getTime();
+  this.uuid = uuid.v1();
+};
+
+Message.prototype.serialize = function serialize(callback) {
+  var messagePrototype = this.builder.build('base.Message');
+  
+  if (messagePrototype === null) {
+    return callback(new Error('E_INTERNAL_NAME'));
+  }
+  
+  if (this.builder.lookup(this.name)) {
+    var messageDataPrototype = this.builder.build(this.name);
+    
+    if (messageDataPrototype === null) {
+      return callback(new Error('E_NAME'));
+    }
+    
+    var messageDataInstance = new messageDataPrototype(this.data);
+    this.data = messageDataInstance.encode().toBuffer();
+    this.checksum = this.calculateChecksum();
+    
+    this.isContentUnserialized = false;
+  }
+  
+  var messageInstance = new messagePrototype({
+    'src': this.source,
+    'dst': this.destination,
+    'name': this.name,
+    'data': this.data,
+    'checksum': this.checksum,
+    'ttl': this.ttl,
+    'uuid': this.uuid
+  });
+  var messageBuffer = messageInstance.encode();
+  
+  var finalBuffer = new ByteBuffer(4);
+  finalBuffer.writeUint32(messageBuffer.limit + 4, 0);
+  finalBuffer = ByteBuffer.concat([ finalBuffer, messageBuffer.toBuffer() ]);
+  
+  return callback(null, finalBuffer.toBuffer());
+};
+
+Message.prototype.parse = function parse(data, callback) {
+  var messagePrototype = this.builder.build('base.Message');
+  
+  if (messagePrototype === null) {
+    return callback(new Error('E_INTERNAL_NAME'));
+  }
+  
+  var messageInstance = messagePrototype.decode(data.toBuffer());
+  
+  this.name = messageInstance.name;
+  this.source = messageInstance.src;
+  this.destination = messageInstance.dst;
+  this.ttl = messageInstance.ttl;
+  this.uuid = messageInstance.uuid;
+  this.data = messageInstance.data.toBuffer();
+  this.checksum = messageInstance.checksum;
+  
+  if (this.checksum !== this.calculateChecksum()) {
+    return callback(new Error('E_CHECKSUM'));
+  }
+  
+  // Decode the message content if we can
+  // This is usefull for router, which don't know about all the message going
+  // through them
+  if (this.builder.lookup(this.name)) {
+    var messageDataPrototype = this.builder.build(this.name);
+    
+    if (messageDataPrototype === null) {
+      return callback(new Error('E_NAME'));
+    }
+    
+    this.data = messageDataPrototype.decode(this.data);
+    this.isContentUnserialized = true;
+  }
+  
+  return callback(null, this);
+};
+
+Message.prototype.calculateChecksum = function calculateChecksum() {
+  var buffer = this.data;
+  if (typeof(window) !== 'undefined') {
+    buffer = new Uint8Array(this.data);
+  }
+  return adler32.sum(buffer);
+};
+
+Messenger.Message = Message;
+
+module.exports = Messenger;
+},{"adler32":9,"bytebuffer":"bytebuffer","long":"long","node-uuid":10,"protobufjs":"protobufjs"}],8:[function(require,module,exports){
+var EventEmitter = require('events').EventEmitter;
+var util = require('util');
+var Long, ByteBuffer;
+if (typeof(window) === 'undefined') {
+  Long = require('long');
+  ByteBuffer = require('bytebuffer');
+}
+else {
+  Long = dcodeIO.Long;
+  ByteBuffer = dcodeIO.ByteBuffer;
+}
+
+var Messenger = require('./Message');
+
+var BROADCAST_ADDRESS = new Long(0, 0, true);
+
+var Stream = function Stream(descriptors, socket, address) {
+  EventEmitter.call(this);
+  
+  this.messenger = new Messenger(descriptors);
+  this.address = Long.fromValue(address || BROADCAST_ADDRESS);
+  this.data = new ByteBuffer(0);
+  this.socket = socket;
+  if (typeof(window) === 'undefined') {
+    this.socket.on('data', this.onData.bind(this));
+  }
+  else {
+    this.socket.onmessage = this.onData.bind(this);
+  }
+};
+util.inherits(Stream, EventEmitter);
+
+Stream.prototype.onData = function onData(data) {
+  if (typeof(window) === 'undefined') {
+    this.data = ByteBuffer.concat([ this.data, data ]);
+  }
+  else {
+    this.data = ByteBuffer.concat([ this.data, data.data ]);
+  }
+  
+  while (this.data.limit) {
+    var messageLength = this.data.readUint32(0);
+    
+    // Do we have received enough data ?
+    if (this.data.limit < messageLength) { break; }
+    
+    var buffer = this.data.copy(4, messageLength);
+    this.messenger.newMessageFromBuffer(buffer, function(err, message) {
+      if (err) {
+        return this.emit('error', err);
+      }
+      
+      // Forward message to upper layer
+      this.emit('message', message);
+      
+      if (message.isContentUnserialized === true) {
+        // Is this message addressed to me ?
+        // Is it a broadcast ?
+        if (message.destination.equals(this.address) === true
+          || message.destination.equals(BROADCAST_ADDRESS) === true) {
+            // Forward message to application layer
+            this.emit(message.name, message);
+        }
+      }
+    }.bind(this));
+    
+    this.data = this.data.copy(messageLength);
+  }
+};
+
+Stream.prototype.sendRaw = function sendRaw(message) {
+  message.serialize(function(err, buffer) {
+    if (!err) {
+      // TODO: Check error
+      this.socket.write(buffer);
+    }
+  }.bind(this));
+};
+
+Stream.prototype.send = function send(/*string*/name, /*object*/data) {
+  var message = this.messenger.newMessage(name, data);
+  message.source = this.address;
+  Stream.prototype.sendRaw.call(this, message);
+};
+
+Stream.prototype.sendToRaw = function sendToRaw(destination, message) {
+  message.destination = destination;
+  Stream.prototype.sendRaw.call(this, message);
+};
+
+Stream.prototype.sendTo = function sendTo(destination, name, data) {
+  var message = this.messenger.newMessage(name, data);
+  message.source = this.address;
+  message.destination = destination;
+  Stream.prototype.sendRaw.call(this, message);
+};
+
+Stream.prototype.on = function on(event, func) {
+  EventEmitter.prototype.removeAllListeners.call(this, event);
+  EventEmitter.prototype.on.call(this, event, func);
+};
+
+module.exports = Stream;
+},{"./Message":7,"bytebuffer":"bytebuffer","events":1,"long":"long","util":5}],9:[function(require,module,exports){
+
+"use strict";
+
+/**
+ * Largest prime smaller than 2^16 (65536)
+ */
+var BASE = 65521;
+
+/**
+ * Largest value n such that 255n(n+1)/2 + (n+1)(BASE-1) <= 2^32-1
+ *
+ * NMAX is just how often modulo needs to be taken of the two checksum word halves to prevent overflowing a 32 bit
+ * integer. This is an optimization. We "could" take the modulo after each byte, and it must be taken before each
+ * digest.
+ */
+var NMAX = 5552;
+
+exports.sum = function(buf, adler)
+{
+	if (adler == null)
+		adler = 1;
+
+	var a = adler & 0xFFFF,
+		b = (adler >>> 16) & 0xFFFF,
+		i = 0,
+		max = buf.length,
+		n, value;
+
+	while (i < max)
+	{
+		n = Math.min(NMAX, max - i);
+
+		do
+		{
+			a += buf[i++]<<0;
+			b += a;
+		}
+		while (--n);
+
+		a %= BASE;
+		b %= BASE;
+	}
+
+	return ((b << 16) | a) >>> 0;
+};
+
+exports.roll = function(sum, length, oldByte, newByte)
+{
+	var a = sum & 0xFFFF,
+		b = (sum >>> 16) & 0xFFFF;
+
+	if (newByte != null)
+	{
+		a = (a - oldByte + newByte + BASE) % BASE;
+		b = (b - ((length * oldByte) % BASE) + a - 1 + BASE) % BASE;
+	}
+	else
+	{
+		a = (a - oldByte + BASE) % BASE;
+		b = (b - ((length * oldByte) % BASE) - 1 + BASE) % BASE;
+	}
+
+	return ((b << 16) | a) >>> 0;
+};
+
+},{}],10:[function(require,module,exports){
+//     uuid.js
+//
+//     Copyright (c) 2010-2012 Robert Kieffer
+//     MIT License - http://opensource.org/licenses/mit-license.php
+
+(function() {
+  var _global = this;
+
+  // Unique ID creation requires a high quality random # generator.  We feature
+  // detect to determine the best RNG source, normalizing to a function that
+  // returns 128-bits of randomness, since that's what's usually required
+  var _rng;
+
+  // Node.js crypto-based RNG - http://nodejs.org/docs/v0.6.2/api/crypto.html
+  //
+  // Moderately fast, high quality
+  if (typeof(_global.require) == 'function') {
+    try {
+      var _rb = _global.require('crypto').randomBytes;
+      _rng = _rb && function() {return _rb(16);};
+    } catch(e) {}
+  }
+
+  if (!_rng && _global.crypto && crypto.getRandomValues) {
+    // WHATWG crypto-based RNG - http://wiki.whatwg.org/wiki/Crypto
+    //
+    // Moderately fast, high quality
+    var _rnds8 = new Uint8Array(16);
+    _rng = function whatwgRNG() {
+      crypto.getRandomValues(_rnds8);
+      return _rnds8;
+    };
+  }
+
+  if (!_rng) {
+    // Math.random()-based (RNG)
+    //
+    // If all else fails, use Math.random().  It's fast, but is of unspecified
+    // quality.
+    var  _rnds = new Array(16);
+    _rng = function() {
+      for (var i = 0, r; i < 16; i++) {
+        if ((i & 0x03) === 0) r = Math.random() * 0x100000000;
+        _rnds[i] = r >>> ((i & 0x03) << 3) & 0xff;
+      }
+
+      return _rnds;
+    };
+  }
+
+  // Buffer class to use
+  var BufferClass = typeof(_global.Buffer) == 'function' ? _global.Buffer : Array;
+
+  // Maps for number <-> hex string conversion
+  var _byteToHex = [];
+  var _hexToByte = {};
+  for (var i = 0; i < 256; i++) {
+    _byteToHex[i] = (i + 0x100).toString(16).substr(1);
+    _hexToByte[_byteToHex[i]] = i;
+  }
+
+  // **`parse()` - Parse a UUID into it's component bytes**
+  function parse(s, buf, offset) {
+    var i = (buf && offset) || 0, ii = 0;
+
+    buf = buf || [];
+    s.toLowerCase().replace(/[0-9a-f]{2}/g, function(oct) {
+      if (ii < 16) { // Don't overflow!
+        buf[i + ii++] = _hexToByte[oct];
+      }
+    });
+
+    // Zero out remaining bytes if string was short
+    while (ii < 16) {
+      buf[i + ii++] = 0;
+    }
+
+    return buf;
+  }
+
+  // **`unparse()` - Convert UUID byte array (ala parse()) into a string**
+  function unparse(buf, offset) {
+    var i = offset || 0, bth = _byteToHex;
+    return  bth[buf[i++]] + bth[buf[i++]] +
+            bth[buf[i++]] + bth[buf[i++]] + '-' +
+            bth[buf[i++]] + bth[buf[i++]] + '-' +
+            bth[buf[i++]] + bth[buf[i++]] + '-' +
+            bth[buf[i++]] + bth[buf[i++]] + '-' +
+            bth[buf[i++]] + bth[buf[i++]] +
+            bth[buf[i++]] + bth[buf[i++]] +
+            bth[buf[i++]] + bth[buf[i++]];
+  }
+
+  // **`v1()` - Generate time-based UUID**
+  //
+  // Inspired by https://github.com/LiosK/UUID.js
+  // and http://docs.python.org/library/uuid.html
+
+  // random #'s we need to init node and clockseq
+  var _seedBytes = _rng();
+
+  // Per 4.5, create and 48-bit node id, (47 random bits + multicast bit = 1)
+  var _nodeId = [
+    _seedBytes[0] | 0x01,
+    _seedBytes[1], _seedBytes[2], _seedBytes[3], _seedBytes[4], _seedBytes[5]
+  ];
+
+  // Per 4.2.2, randomize (14 bit) clockseq
+  var _clockseq = (_seedBytes[6] << 8 | _seedBytes[7]) & 0x3fff;
+
+  // Previous uuid creation time
+  var _lastMSecs = 0, _lastNSecs = 0;
+
+  // See https://github.com/broofa/node-uuid for API details
+  function v1(options, buf, offset) {
+    var i = buf && offset || 0;
+    var b = buf || [];
+
+    options = options || {};
+
+    var clockseq = options.clockseq != null ? options.clockseq : _clockseq;
+
+    // UUID timestamps are 100 nano-second units since the Gregorian epoch,
+    // (1582-10-15 00:00).  JSNumbers aren't precise enough for this, so
+    // time is handled internally as 'msecs' (integer milliseconds) and 'nsecs'
+    // (100-nanoseconds offset from msecs) since unix epoch, 1970-01-01 00:00.
+    var msecs = options.msecs != null ? options.msecs : new Date().getTime();
+
+    // Per 4.2.1.2, use count of uuid's generated during the current clock
+    // cycle to simulate higher resolution clock
+    var nsecs = options.nsecs != null ? options.nsecs : _lastNSecs + 1;
+
+    // Time since last uuid creation (in msecs)
+    var dt = (msecs - _lastMSecs) + (nsecs - _lastNSecs)/10000;
+
+    // Per 4.2.1.2, Bump clockseq on clock regression
+    if (dt < 0 && options.clockseq == null) {
+      clockseq = clockseq + 1 & 0x3fff;
+    }
+
+    // Reset nsecs if clock regresses (new clockseq) or we've moved onto a new
+    // time interval
+    if ((dt < 0 || msecs > _lastMSecs) && options.nsecs == null) {
+      nsecs = 0;
+    }
+
+    // Per 4.2.1.2 Throw error if too many uuids are requested
+    if (nsecs >= 10000) {
+      throw new Error('uuid.v1(): Can\'t create more than 10M uuids/sec');
+    }
+
+    _lastMSecs = msecs;
+    _lastNSecs = nsecs;
+    _clockseq = clockseq;
+
+    // Per 4.1.4 - Convert from unix epoch to Gregorian epoch
+    msecs += 12219292800000;
+
+    // `time_low`
+    var tl = ((msecs & 0xfffffff) * 10000 + nsecs) % 0x100000000;
+    b[i++] = tl >>> 24 & 0xff;
+    b[i++] = tl >>> 16 & 0xff;
+    b[i++] = tl >>> 8 & 0xff;
+    b[i++] = tl & 0xff;
+
+    // `time_mid`
+    var tmh = (msecs / 0x100000000 * 10000) & 0xfffffff;
+    b[i++] = tmh >>> 8 & 0xff;
+    b[i++] = tmh & 0xff;
+
+    // `time_high_and_version`
+    b[i++] = tmh >>> 24 & 0xf | 0x10; // include version
+    b[i++] = tmh >>> 16 & 0xff;
+
+    // `clock_seq_hi_and_reserved` (Per 4.2.2 - include variant)
+    b[i++] = clockseq >>> 8 | 0x80;
+
+    // `clock_seq_low`
+    b[i++] = clockseq & 0xff;
+
+    // `node`
+    var node = options.node || _nodeId;
+    for (var n = 0; n < 6; n++) {
+      b[i + n] = node[n];
+    }
+
+    return buf ? buf : unparse(b);
+  }
+
+  // **`v4()` - Generate random UUID**
+
+  // See https://github.com/broofa/node-uuid for API details
+  function v4(options, buf, offset) {
+    // Deprecated - 'format' argument, as supported in v1.2
+    var i = buf && offset || 0;
+
+    if (typeof(options) == 'string') {
+      buf = options == 'binary' ? new BufferClass(16) : null;
+      options = null;
+    }
+    options = options || {};
+
+    var rnds = options.random || (options.rng || _rng)();
+
+    // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+    rnds[6] = (rnds[6] & 0x0f) | 0x40;
+    rnds[8] = (rnds[8] & 0x3f) | 0x80;
+
+    // Copy bytes to buffer, if provided
+    if (buf) {
+      for (var ii = 0; ii < 16; ii++) {
+        buf[i + ii] = rnds[ii];
+      }
+    }
+
+    return buf || unparse(rnds);
+  }
+
+  // Export public API
+  var uuid = v4;
+  uuid.v1 = v1;
+  uuid.v4 = v4;
+  uuid.parse = parse;
+  uuid.unparse = unparse;
+  uuid.BufferClass = BufferClass;
+
+  if (typeof(module) != 'undefined' && module.exports) {
+    // Publish as node.js module
+    module.exports = uuid;
+  } else  if (typeof define === 'function' && define.amd) {
+    // Publish as AMD module
+    define(function() {return uuid;});
+ 
+
+  } else {
+    // Publish as global (in browsers)
+    var _previousRoot = _global.uuid;
+
+    // **`noConflict()` - (browser only) to reset global 'uuid' var**
+    uuid.noConflict = function() {
+      _global.uuid = _previousRoot;
+      return uuid;
+    };
+
+    _global.uuid = uuid;
+  }
+}).call(this);
+
+},{}],"WSClient":[function(require,module,exports){
 var ws;
 if (typeof(window) === 'undefined') {
   ws = require('ws');
@@ -1707,4 +1702,4 @@ WSClient.prototype.close = function close() {
 };
 
 module.exports = WSClient;
-},{"./Client":1,"util":10,"ws":"ws"}]},{},[]);
+},{"./Client":6,"util":5,"ws":"ws"}]},{},[]);
